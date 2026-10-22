@@ -1,0 +1,23 @@
+PPO 9x9 50k: mean=196.1 median=157.5 max=834 mine_hit=1.000
+DQN 9x9 seed 17: mean=216.2 median=173.0 max=1054 mine_hit=0.962
+PPO 15x15 100k: mean=231.9 median=177.5 max=1134 mine_hit=1.000
+DQN 15x15 raw: mean=243.2 median=190.0 max=1081 mine_hit=0.996
+DQN 15x15 + rules: mean=1453.9 median=1564.5 max=2295 mine_hit=0.162
+random: mean=118.8 median=84.0 max=639
+rules: mean=1248.1 median=1297.5 max=2127
+csp: mean=1304.1 median=1312.0 max=2290
+PPO 9x9 50k - random: delta=77.3 paired_95%_CI=[65.8, 89.5] win=322/500
+PPO 9x9 50k - rules: delta=-1052.0 paired_95%_CI=[-1089.5, -1014.6] win=26/500
+PPO 9x9 50k - csp: delta=-1108.0 paired_95%_CI=[-1139.5, -1075.8] win=13/500
+DQN 9x9 seed 17 - random: delta=97.4 paired_95%_CI=[84.6, 110.9] win=395/500
+DQN 9x9 seed 17 - rules: delta=-1031.9 paired_95%_CI=[-1069.4, -993.2] win=29/500
+DQN 9x9 seed 17 - csp: delta=-1087.9 paired_95%_CI=[-1118.5, -1056.2] win=12/500
+PPO 15x15 100k - random: delta=113.1 paired_95%_CI=[97.4, 129.8] win=363/500
+PPO 15x15 100k - rules: delta=-1016.3 paired_95%_CI=[-1054.7, -976.8] win=27/500
+PPO 15x15 100k - csp: delta=-1072.3 paired_95%_CI=[-1105.5, -1039.2] win=10/500
+DQN 15x15 raw - random: delta=124.4 paired_95%_CI=[108.5, 141.2] win=388/500
+DQN 15x15 raw - rules: delta=-1005.0 paired_95%_CI=[-1043.1, -966.1] win=27/500
+DQN 15x15 raw - csp: delta=-1061.0 paired_95%_CI=[-1093.6, -1027.9] win=13/500
+DQN 15x15 + rules - random: delta=1335.1 paired_95%_CI=[1288.2, 1380.6] win=493/500
+DQN 15x15 + rules - rules: delta=205.7 paired_95%_CI=[163.8, 246.6] win=373/500
+DQN 15x15 + rules - csp: delta=149.7 paired_95%_CI=[104.5, 193.4] win=345/500
