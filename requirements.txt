@@ -1,0 +1,10 @@
+# minesweeper-rl (conda env: minesweeper-rl, python 3.11)
+gymnasium>=1.0
+numpy>=1.26
+matplotlib>=3.8
+pytest>=8
+# heavy (installed separately, CPU torch):
+# torch (cpu wheel) --index-url https://download.pytorch.org/whl/cpu
+# stable-baselines3>=2.0
+# sb3-contrib>=2.0
+# pygame>=2.5  (optional second viewer backend)
