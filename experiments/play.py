@@ -5,7 +5,8 @@ Usage:
     python -m experiments.play --agent dqn --model dqn_cnn.npz
 
 Click Play to advance actions, Pause to stop, Replay for the same seed, or
-New Game to advance to the next reproducible seed.
+New Game to advance to the next reproducible seed. Safe-only pauses at guesses;
+click Continue to explicitly resume with the lowest-risk guess.
 """
 from __future__ import annotations
 
@@ -22,17 +23,28 @@ from agents.policies import load_policy
 from env.gym_wrapper import MinesweeperWindowEnv
 from env.mines import InfiniteBoard
 from env.viewer import CELL_CMAP, CELL_COLORS_BY_STATE, CELL_NORM, NUMBER_COLORS, window_array
-from solvers.baselines import random_move, rules_move, csp_move
+from solvers.baselines import (random_move, rules_move, csp_move, chordable_clue,
+                               window_csp_candidates, chordable_clue_in_window)
 
-PLAYBACK_SPEED = 1.0  # 1x = native agent pace; 0.5x = half pace
-PLAYBACK_FRAME_MS = 10  # event-loop poll interval in ms; speed pacing uses measured action time
+PLAYBACK_SPEED = 1.0  # 1x = no extra pacing delay; 0.5x = half native rate
+PLAYBACK_FRAME_MS = 10  # GUI event-loop poll interval in ms
+
+
+def observed_action_rate(durations):
+    """Actions per second from wall-clock time spent between completed actions."""
+    return len(durations) / sum(durations) if durations and sum(durations) > 0 else None
 
 
 class PlaySession:
-    def __init__(self, agent, model, density, seed, window, max_actions):
+    def __init__(self, agent, model, density, seed, window, max_actions,
+                 safe_only=False):
         self.agent, self.model = agent, model
         self.density, self.seed = density, seed
         self.window, self.max_actions = window, max_actions
+        self.safe_only = safe_only
+        if safe_only and agent not in ("ppo", "dqn"):
+            raise ValueError("--safe-only requires a PPO or DQN policy")
+        self.waiting_for_safe_move = False
         self.rng = random.Random(seed)
         self.act = None
         self.env = None
@@ -62,6 +74,8 @@ class PlaySession:
         self.moves, self.points, self.done = 0, 0.0, False
         self.last_action, self.last_new, self.last_hit = None, 0, False
         self.last_step_seconds = None
+        self.last_guess_risk = None
+        self.waiting_for_safe_move = False
         self.message = "Ready"
         self.rng = random.Random(self.seed)
         if self.env:
@@ -74,13 +88,68 @@ class PlaySession:
             self._focus = (0, 0)
 
 
+    def _agent_chord(self):
+        clue = (chordable_clue_in_window(self.obs, self.focus) if self.env
+                else chordable_clue(self.board))
+        if clue is None:
+            return False
+        newly, hit, used = self.board.chord(*clue)
+        if not used:
+            return False
+        if self.env:
+            self.env.focus = clue
+            self.obs = self.env._obs()
+            reward = (-self.env.mine_penalty if hit else len(newly) - self.env.step_cost)
+            self.done = hit or self.board.over_budget()
+        else:
+            self._focus = clue
+            reward = -10.0 if hit else len(newly) - 0.02
+            self.done = hit or (self.max_actions is not None
+                                and self.moves + 1 >= self.max_actions)
+        self.points += reward
+        self.moves += 1
+        self.last_action, self.last_new, self.last_hit = clue, len(newly), hit
+        self.message = "Mine hit" if hit else f"Auto-chord revealed {len(newly)} cells"
+        return True
+
     def advance(self):
         if self.done or self.agent == "human":
             return
         if self.env:
             mask = self.obs["action_mask"].astype(bool)
+            candidates, risk, certain_mines = window_csp_candidates(
+                self.obs, self.focus, self.density, cap=100_000, max_cells=25)
+            for mine in certain_mines:
+                self.board.flags.add(mine)
+            if certain_mines:
+                self.obs = self.env._obs()
+                mask = self.obs["action_mask"].astype(bool)
+            if self._agent_chord():
+                return
+            if self.safe_only and risk > 0.0:
+                self.waiting_for_safe_move = True
+                self.message = "Paused: no logically guaranteed-safe move; Continue to guess"
+                return
+            # The local solver never reads or recenters to hidden board state.
+            self.obs = self.env._obs()
+            mask = self.obs["action_mask"].astype(bool)
+            if self.flag_actions:
+                flag_mask = np.zeros(self.env.n_cells, dtype=bool)
+                for action in range(self.env.n_cells):
+                    flag_mask[action] = self.env._coords(action) in certain_mines
+                mask[self.env.n_cells:] &= flag_mask
+            else:
+                mask[self.env.n_cells:] = False
+            # Let the learned model rank only equally low-risk legal actions.
+            candidate_mask = np.zeros(self.env.n_cells, dtype=bool)
+            for action in range(self.env.n_cells):
+                candidate_mask[action] = self.env._coords(action) in candidates
+            mask[:self.env.n_cells] &= candidate_mask
+            if not mask.any():
+                raise RuntimeError("local CSP selected no legal reveal or certain mine")
             started = time.perf_counter()
             self.obs, reward, term, trunc, info = self.env.step(self.act(self.obs, mask))
+            self.last_guess_risk = risk
             self.last_step_seconds = time.perf_counter() - started
             self.points += reward
             self.last_action = info.get("cell", info["focus"])
@@ -91,8 +160,13 @@ class PlaySession:
             if info.get("flag_action"):
                 self.message = (("Flagged mine" if info["correct"] else "Incorrect flag")
                                 if info["flagged"] else "Flag removed")
+            elif term:
+                self.message = "Mine hit"
             else:
-                self.message = "Mine hit" if term else "Playing"
+                self.message = (f"Guess ({risk:.1%} mine risk)" if risk > 0.0
+                                else "Proven-safe move")
+                if risk > 0.0:
+                    self.safe_only = False
         else:
             if self.agent == "random":
                 cell = random_move(self.board, self.rng)
@@ -100,6 +174,8 @@ class PlaySession:
                 cell, _ = rules_move(self.board, self.rng)
             else:
                 cell, _, _ = csp_move(self.board, self.rng)
+                if self._agent_chord():
+                    return
             started = time.perf_counter()
             newly, hit = self.board.reveal(*cell)
             self.last_step_seconds = time.perf_counter() - started
@@ -111,6 +187,42 @@ class PlaySession:
             self.message = "Mine hit" if hit else "Playing"
         if self.max_actions is not None and self.moves >= self.max_actions and self.message not in ("Mine hit", "Budget reached"):
             self.message = "Action limit reached"
+
+    def click_chord(self, ix, iy, center=None):
+        """Reveal all hidden neighbors when a revealed clue's flags match it."""
+        if (self.agent != "human" or self.done
+                or not (0 <= ix < self.window and 0 <= iy < self.window)):
+            return False
+        cx, cy = center or self.focus
+        x, y = cx + ix - self.window // 2, cy + iy - self.window // 2
+        clue = self.board.revealed.get((x, y))
+        if clue is None:
+            return False
+        flagged = sum((x + dx, y + dy) in self.board.flags
+                      for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dx, dy) != (0, 0))
+        if flagged != clue:
+            self.message = f"Chord needs {clue} flags; found {flagged}"
+            return True
+        targets = [(x + dx, y + dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                   if (dx, dy) != (0, 0)
+                   if (x + dx, y + dy) not in self.board.revealed
+                   and (x + dx, y + dy) not in self.board.flags]
+        if not targets:
+            return True
+        started = time.perf_counter()
+        newly, hit, used = self.board.chord(x, y)
+        if not used:
+            return False
+        self.last_step_seconds = time.perf_counter() - started
+        self._focus = (x, y)
+        self.last_action = next((cell for cell in targets
+                                 if self.board.dead and self.board.mine_at(*cell)), (x, y))
+        self.last_new, self.last_hit = len(newly), hit
+        self.moves += 1
+        self.points += -10.0 if hit else len(newly) - 0.02
+        self.done = hit or (self.max_actions is not None and self.moves >= self.max_actions)
+        self.message = "Mine hit" if hit else f"Chord revealed {len(newly)} cells"
+        return True
 
     def click_cell(self, ix, iy, flag=False, center=None):
         """Apply a board click at local window position (ix, iy)."""
@@ -167,10 +279,10 @@ def build_window(session):
     flag_guide_text = None
     if session.agent == "human":
         flag_guide_text = fig.text(0.5, 0.93,
-                                   "Left-click reveal · Right-click flag · drag to inspect",
+                                   "Left-click reveal · Right-click flag · hold both on a clue to chord · drag to inspect",
                                    ha="center", va="center", fontsize=10)
     elif session.flag_actions:
-        flag_guide_text = fig.text(0.5, 0.93, "Agent may reveal or flag cells",
+        flag_guide_text = fig.text(0.5, 0.93, "Solver auto-flags certain mines and chords matching clues",
                                    ha="center", va="center", fontsize=10)
     hw = session.window // 2
     view_center = list(session.focus)
@@ -186,10 +298,10 @@ def build_window(session):
     image.set_norm(CELL_NORM)
     image.set_zorder(0)
     status = fig.text(0.5, 0.16, "", ha="center", fontsize=9)
-    speed_label = fig.text(0.5, 0.125, "", ha="center", fontsize=9)
+    speed_label = fig.text(0.5, 0.125, "Observed: measuring actions/s", ha="center", fontsize=9)
     footer_text = (None if session.agent == "human" else
                    fig.text(0.5, 0.09,
-                            f"{PLAYBACK_SPEED:g}x agent real speed · drag to inspect · Continue recenters",
+                            f"{PLAYBACK_SPEED:g}x playback · drag to inspect · Continue recenters",
                             ha="center", fontsize=9))
     flag_patches, mine_patches, number_labels = [], [], []
     mine_artist = ax.scatter([], [], marker="$✹$", s=120, color="#111111", zorder=4)
@@ -252,14 +364,11 @@ def build_window(session):
             f"{session.agent} · seed {session.seed} · points {session.points:.1f} · "
             f"revealed {len(session.board.revealed)} · actions {session.moves} · {session.message}"
         )
-        if speed_samples:
-            native_rate = 1.0 / max(1e-6, sum(speed_samples) / len(speed_samples))
-            speed_label.set_text(
-                f"Speed: {PLAYBACK_SPEED:g}x agent real speed "
-                f"({native_rate * PLAYBACK_SPEED:.1f} actions/s)"
-            )
-        else:
-            speed_label.set_text("")
+        rate = observed_action_rate(speed_samples)
+        speed_label.set_text(
+            f"Observed: {rate:.1f} actions/s (wall-clock)" if rate is not None
+            else "Observed: measuring actions/s"
+        )
         fig.canvas.draw_idle()
 
     running = [False]
@@ -273,9 +382,11 @@ def build_window(session):
         play_button.ax.set_visible(False)
     if PLAYBACK_SPEED <= 0:
         raise ValueError("PLAYBACK_SPEED must be positive")
-    # Poll frequently; sub-1x pacing is computed from measured step + render time.
+    # Poll for input at 100 Hz; action rate is measured from completed GUI ticks.
     timer = fig.canvas.new_timer(interval=PLAYBACK_FRAME_MS)
     next_step_at = [0.0]
+
+    last_action_finished_at = [None]
 
     def tick():
         if not running[0] or time.perf_counter() < next_step_at[0]:
@@ -285,10 +396,18 @@ def build_window(session):
         session.advance()
         view_center[:] = session.focus
         draw()
-        elapsed = max(time.perf_counter() - started, 1e-6)
+        finished_at = time.perf_counter()
+        if session.waiting_for_safe_move:
+            running[0] = False
+            timer.stop()
+            play_button.label.set_text("Continue")
+        elapsed = max(finished_at - started, 1e-6)
         if session.moves > previous_moves:
-            speed_samples.append(max(session.last_step_seconds or 0, 1e-6))
+            previous = last_action_finished_at[0]
+            speed_samples.append(max(finished_at - (previous or started), 1e-6))
+            last_action_finished_at[0] = finished_at
             del speed_samples[:-30]
+            draw()  # refresh the measured rate with this completed action included
         next_step_at[0] = time.perf_counter() + elapsed * max(0.0, 1.0 / PLAYBACK_SPEED - 1.0)
         if session.done:
             running[0] = False
@@ -299,9 +418,13 @@ def build_window(session):
         if running[0]:
             running[0] = False
             timer.stop()
+            last_action_finished_at[0] = None  # don't count time spent paused
             play_button.label.set_text("Continue")
             draw()
             return
+        if session.waiting_for_safe_move:
+            session.safe_only = False  # Continue explicitly accepts the solver's best-risk guess.
+            session.waiting_for_safe_move = False
         view_center[:] = session.focus
         if session.done or session.agent == "human":
             draw()
@@ -318,9 +441,11 @@ def build_window(session):
     def reset(_event, new_game=False):
         running[0] = False
         speed_samples.clear()
+        last_action_finished_at[0] = None
         next_step_at[0] = 0.0
         timer.stop()
         session.reset(new_game=new_game)
+        last_action_finished_at[0] = None
         view_center[:] = session.focus
         play_button.label.set_text("Continue")
         draw()
@@ -344,14 +469,26 @@ def build_window(session):
             view_center[:] = session.focus
             draw()
 
-    drag = {"start": None, "center": None, "moved": False, "button": None}
+    drag = {"start": None, "center": None, "moved": False, "button": None,
+            "chorded": False}
+    buttons_down = {}
 
     def mouse_down(event):
-        if event.inaxes is ax and event.button in (1, 3) and event.xdata is not None and event.ydata is not None:
-            drag["start"] = (event.xdata, event.ydata)
-            drag["center"] = tuple(view_center)
-            drag["moved"] = False
-            drag["button"] = event.button
+        if event.inaxes is not ax or event.button not in (1, 3) or event.xdata is None or event.ydata is None:
+            return
+        ix, iy = int(np.floor(event.xdata + .5)), int(np.floor(event.ydata + .5))
+        if not (0 <= ix < session.window and 0 <= iy < session.window):
+            return
+        buttons_down[event.button] = (ix, iy)
+        drag["start"] = (event.xdata, event.ydata)
+        drag["center"] = tuple(view_center)
+        drag["moved"] = False
+        drag["button"] = event.button
+        if (set(buttons_down) == {1, 3}
+                and buttons_down[1] == buttons_down[3]):
+            drag["chorded"] = True
+            session.click_chord(ix, iy, center=view_center)
+            draw()
 
     def mouse_move(event):
         if running[0] or drag["start"] is None or drag["button"] != 1 or event.inaxes is not ax:
@@ -364,6 +501,11 @@ def build_window(session):
         draw()
 
     def mouse_up(event):
+        buttons_down.pop(event.button, None)
+        if drag["chorded"]:
+            if not buttons_down:
+                drag.update(start=None, center=None, moved=False, button=None, chorded=False)
+            return
         was_drag = drag["moved"]
         drag["start"] = drag["center"] = None
         released_button = drag["button"]
@@ -408,6 +550,8 @@ def main():
     parser.add_argument("--moves", type=int, default=None,
                         help="optional maximum actions before the viewer stops (default: no action limit)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--safe-only", action="store_true",
+                        help="pause instead of taking the solver's lowest-risk guess; Continue accepts it")
     args = parser.parse_args()
     if args.window < 1 or args.window % 2 == 0:
         parser.error("--window must be a positive odd number")
@@ -415,7 +559,7 @@ def main():
         parser.error("--moves must be positive")
     try:
         session = PlaySession(args.agent, args.model, args.density, args.seed,
-                              args.window, args.moves)
+                              args.window, args.moves, safe_only=args.safe_only)
     except ValueError as exc:
         parser.error(str(exc))
     build_window(session)

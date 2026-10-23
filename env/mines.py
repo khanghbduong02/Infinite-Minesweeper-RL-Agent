@@ -70,6 +70,30 @@ class InfiniteBoard:
         else:
             self.flags.add((x, y))
 
+    def chord(self, x: int, y: int) -> tuple[list[tuple[int, int]], bool, bool]:
+        """Chord a clue when adjacent flag count matches; return (new, hit, used)."""
+        if self.dead or (x, y) not in self.revealed:
+            return [], False, False
+        flagged = sum((x + dx, y + dy) in self.flags for dx, dy in NEIGHBORS)
+        if flagged != self.revealed[(x, y)]:
+            return [], False, False
+        targets = [(x + dx, y + dy) for dx, dy in NEIGHBORS
+                   if (x + dx, y + dy) not in self.revealed
+                   and (x + dx, y + dy) not in self.flags]
+        if not targets:
+            return [], False, True
+        if self.max_steps is not None and self.steps >= self.max_steps:
+            return [], False, True
+        steps = self.steps
+        newly, hit = [], False
+        for tx, ty in targets:
+            opened, hit = self.reveal(tx, ty)
+            newly.extend(opened)
+            if hit:
+                break
+        self.steps = steps + 1
+        return newly, hit, True
+
     def reveal(self, x: int, y: int) -> tuple[list[tuple[int, int]], bool]:
         """Reveal one cell. Returns (newly_revealed, hit_mine). Safe-start
         cells never contain mines. Zero cells flood-fill."""
