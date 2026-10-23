@@ -15,7 +15,8 @@ import numpy as np
 from agents.policies import load_policy
 from env.gym_wrapper import MinesweeperWindowEnv
 from env.mines import InfiniteBoard
-from solvers.baselines import random_move, rules_move, csp_move
+from solvers.baselines import (random_move, rules_move, csp_move,
+                               window_csp_candidates)
 from solvers.common import trivial_deductions
 
 
@@ -48,23 +49,68 @@ def run_episodes(agent: str, episodes: int, p: float, seed0: int = 0,
 
 
 def deduction_override(env, obs, act):
-    """Use model scores only among forced-safe reveals; use it normally to guess."""
-    safe, mines = trivial_deductions(env.board.revealed, env.board.flags)
-    for cell in mines:
-        env.board.flag(*cell)
-    safe, _ = trivial_deductions(env.board.revealed, env.board.flags)
-    safe = {cell for cell in safe
-            if cell not in env.board.revealed and cell not in env.board.flags}
+    """Use exact constraint probabilities; model ranks only equally safe actions."""
+    candidates, _, certain_mines = window_csp_candidates(obs, env.focus, env.p)
+    for mine in certain_mines:
+        env.board.flags.add(mine)
     obs = env._obs()
     mask = obs["action_mask"].astype(bool)
-    if safe:
-        safe_mask = np.zeros_like(mask)
+    candidate_mask = np.zeros(env.n_cells, dtype=bool)
+    for action in range(env.n_cells):
+        candidate_mask[action] = env._coords(action) in candidates
+    mask[:env.n_cells] &= candidate_mask
+    if env.flag_actions:
+        flag_mask = np.zeros(env.n_cells, dtype=bool)
         for action in range(env.n_cells):
-            if env._coords(action) in safe:
-                safe_mask[action] = True
-        if (mask & safe_mask).any():
-            mask &= safe_mask
+            flag_mask[action] = env._coords(action) in certain_mines
+        mask[env.n_cells:] &= flag_mask
+    else:
+        mask[env.n_cells:] = False
     return act(obs, mask)
+
+
+def safe_policy_action(env, act):
+    """Choose an exactly proven-safe reveal; return None rather than guess."""
+    candidates, risk, certain_mines = window_csp_candidates(env._obs(), env.focus, env.p)
+    for mine in certain_mines:
+        env.board.flags.add(mine)
+    if risk > 0.0:
+        return None
+    obs = env._obs()
+    mask = obs["action_mask"].astype(bool)
+    candidate_mask = np.zeros(env.n_cells, dtype=bool)
+    for action in range(env.n_cells):
+        candidate_mask[action] = env._coords(action) in candidates
+    mask[:env.n_cells] &= candidate_mask
+    if env.flag_actions:
+        flag_mask = np.zeros(env.n_cells, dtype=bool)
+        for action in range(env.n_cells):
+            flag_mask[action] = env._coords(action) in certain_mines
+        mask[env.n_cells:] &= flag_mask
+    else:
+        mask[env.n_cells:] = False
+    return act(obs, mask) if mask.any() else None
+
+
+def run_safe_policy_episodes(act, window: int, episodes: int, p: float, seed0: int = 0,
+                             max_steps: int = 300, max_revealed: int = 2000,
+                             flag_actions: bool = False):
+    """Evaluate with a no-guess shield; episodes pause when deduction is impossible."""
+    env = MinesweeperWindowEnv(window_size=window, p=p, max_steps=max_steps,
+                               max_revealed=max_revealed, flag_actions=flag_actions)
+    lengths, hits, stopped_uncertain = [], 0, 0
+    for ep in range(episodes):
+        obs, _ = env.reset(seed=seed0 + ep)
+        term = trunc = False
+        while not (term or trunc):
+            action = safe_policy_action(env, act)
+            if action is None:
+                stopped_uncertain += 1
+                break
+            obs, _, term, trunc, _ = env.step(action)
+        lengths.append(len(env.board.revealed))
+        hits += term
+    return lengths, hits / episodes, stopped_uncertain / episodes
 
 
 def run_policy_episodes(act, window: int, episodes: int, p: float, seed0: int = 0,
@@ -96,7 +142,9 @@ def main():
     ap.add_argument("--model", type=str, default=None,
                     help="ppo: saved MaskablePPO model; dqn: .npz weights")
     ap.add_argument("--deduction-override", action="store_true",
-                    help="let the model break ties among forced-safe reveals and choose guesses otherwise")
+                    help="use deductions when available, but still guess when necessary")
+    ap.add_argument("--safe-only", action="store_true",
+                    help="never guess: stop an episode if no logically safe reveal is known")
     args = ap.parse_args()
     if args.policy in ("ppo", "dqn"):
         if not args.model:
@@ -104,13 +152,21 @@ def main():
         loaded_policy = load_policy(args.policy, args.model)
         act, window = loaded_policy[:2]
         flag_actions = loaded_policy[2] if len(loaded_policy) == 3 else False
-        L, hit_rate = run_policy_episodes(
-            act, window, args.episodes, args.density, flag_actions=flag_actions,
-            deduction_override_enabled=args.deduction_override)
+        if args.safe_only and args.deduction_override:
+            ap.error("--safe-only and --deduction-override are mutually exclusive")
+        stopped_rate = 0.0
+        if args.safe_only:
+            L, hit_rate, stopped_rate = run_safe_policy_episodes(
+                act, window, args.episodes, args.density, flag_actions=flag_actions)
+        else:
+            L, hit_rate = run_policy_episodes(
+                act, window, args.episodes, args.density, flag_actions=flag_actions,
+                deduction_override_enabled=args.deduction_override)
         print(f"{args.policy:6s} mean={statistics.mean(L):7.1f} "
               f"median={statistics.median(L):7.1f} max={max(L):5d} "
               f"mine_hit_rate={hit_rate:.3f} window={window} "
-              f"deduction_override={args.deduction_override}")
+              f"deduction_override={args.deduction_override} "
+              f"safe_only={args.safe_only} stopped_uncertain={stopped_rate:.3f}")
         return
     agents = ("random", "rules", "csp") if args.policy == "all" else (args.policy,)
     for agent in agents:
