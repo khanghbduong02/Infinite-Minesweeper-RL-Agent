@@ -20,6 +20,23 @@ def test_safe_start():
             assert not b.mine_at(dx, dy)
 
 
+def test_chord_reveals_neighbors_only_when_flags_match_clue():
+    board = InfiniteBoard(seed=0, p=0.0, max_steps=None, max_revealed=None)
+    board.revealed = {(0, 0): 1}
+    board.flags = {(1, 0)}
+    board.mine_at = lambda x, y: False
+    opened, hit, used = board.chord(0, 0)
+    assert used and not hit
+    assert len(opened) > 0
+    assert board.steps == 1
+
+    bad = InfiniteBoard(seed=0, p=0.0)
+    bad.revealed = {(0, 0): 1}
+    opened, hit, used = bad.chord(0, 0)
+    assert not used and not hit and opened == []
+    assert bad.steps == 0
+
+
 def test_cascade_opens_area():
     # bounded arena: ring of mines at Chebyshev distance 3 around (5,5),
     # interior all safe -> one reveal flood-fills the interior (fast, bounded).
@@ -135,6 +152,14 @@ def test_unlimited_board_and_env_do_not_truncate_at_training_budgets():
     assert not terminated and not truncated
 
 
+def test_observed_action_rate_uses_elapsed_wall_time():
+    from experiments.play import observed_action_rate
+
+    assert observed_action_rate([0.2, 0.3, 0.5]) == 1.0 / 0.3333333333333333
+    assert observed_action_rate([]) is None
+    assert observed_action_rate([0.0]) is None
+
+
 def test_live_play_viewer_shows_controls_and_advances_agent():
     import matplotlib
     matplotlib.use("Agg", force=True)
@@ -159,7 +184,8 @@ def test_live_play_viewer_shows_controls_and_advances_agent():
     session = PlaySession("rules", None, 0.16, 0, 9, 10)
     fig = build_window(session)
     texts = [text.get_text() for text in fig.texts]
-    assert any("1x agent real speed" in text for text in texts)
+    assert any("1x playback" in text for text in texts)
+    assert any("Observed: measuring actions/s" in text for text in texts)
     assert any("drag to inspect" in text for text in texts)
     assert not any("flag" in text.lower() for text in texts)
     assert fig._flag_guide_text is None
@@ -213,6 +239,80 @@ def test_live_play_viewer_shows_controls_and_advances_agent():
     assert np.allclose(image.get_cmap()(image.norm(-3))[:3], matplotlib.colors.to_rgb(CELL_COLORS_BY_STATE["mine"]))
     assert np.allclose(image.get_cmap()(image.norm(-1))[:3], matplotlib.colors.to_rgb(CELL_COLORS_BY_STATE["flag"]))
     assert fig._play_widgets[3].interval == 10
+    rate_text = next(text for text in fig.texts if text.get_text().startswith("Observed:"))
+    assert rate_text.get_text() == "Observed: measuring actions/s"
+    plt.close(fig)
+
+
+def test_csp_agent_auto_chords_certified_flags():
+    from experiments.play import PlaySession
+
+    session = PlaySession("csp", None, 0.16, 0, 9, None)
+    session.board.revealed = {(0, 0): 1}
+    session.board.flags = {(1, 0)}
+    session.board.mine_at = lambda x, y: (x, y) == (1, 0)
+    session.advance()
+    assert "Auto-chord" in session.message
+    assert session.moves == 1
+    assert not session.last_hit
+    assert all(cell not in session.board.revealed for cell in session.board.flags)
+
+
+def test_safe_only_live_policy_abstains_when_deduction_is_impossible():
+    from experiments.play import PlaySession
+
+    session = PlaySession("dqn", "dqn_cnn_flags_15x15_context_200.npz",
+                          0.16, 0, 15, 20, safe_only=True)
+    session.board.revealed = {(0, 0): 1}
+    session.board.flags.clear()
+    session.obs = session.env._obs()
+    session.advance()
+    assert session.waiting_for_safe_move
+    assert session.moves == 0
+    assert not session.last_hit
+    # Continue is an explicit opt-in to the minimum-risk guess instead of
+    # becoming an indefinite no-op; the UI Pause button remains user controlled.
+    session.safe_only = False
+    session.advance()
+    assert session.moves == 1
+
+
+def test_human_chord_action_reveals_only_when_flag_count_matches():
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    from types import SimpleNamespace
+    from experiments.play import PlaySession, build_window
+
+    game = PlaySession("human", None, 0.16, 0, 9, None)
+    game.board.revealed = {(0, 0): 1}
+    game.board.flags = {(1, 0)}
+    game.board.mine_at = lambda _x, _y: False
+    assert game.click_chord(4, 4)
+    assert len(game.board.revealed) > 1
+    assert game.moves == 1 and "Chord revealed" in game.message
+
+    before = set(game.board.revealed)
+    game.board.flags.clear()
+    assert game.click_chord(4, 4)
+    assert game.board.revealed.keys() == before
+    assert "needs 1 flags" in game.message
+
+    fig = build_window(game)
+    ax = fig.axes[0]
+    def mouse_event(button, ix, iy):
+        return SimpleNamespace(inaxes=ax, button=button, xdata=ix, ydata=iy)
+    # Both buttons over the same clue trigger a chord; releasing them does not
+    # accidentally dispatch a separate left/right click.
+    game.board.revealed = {(0, 0): 1}
+    game.board.flags = {(1, 0)}
+    game.board.mine_at = lambda _x, _y: False
+    fig._mouse_down(mouse_event(1, 4, 4))
+    fig._mouse_down(mouse_event(3, 4, 4))
+    assert game.moves == 2
+    fig._mouse_up(mouse_event(1, 4, 4))
+    fig._mouse_up(mouse_event(3, 4, 4))
+    assert game.moves == 2
+    import matplotlib.pyplot as plt
     plt.close(fig)
 
 
@@ -236,6 +336,7 @@ def test_human_left_reveal_right_flag_and_seed_reset():
     assert len(fig._flag_artists) == 3
     assert fig._flag_guide_text is not None
     assert "Right-click flag" in fig._flag_guide_text.get_text()
+    assert "both on a clue" in fig._flag_guide_text.get_text()
     assert fig._footer_text is None
     assert fig._flag_guide_text.get_position()[1] > fig.axes[0].get_position().y1
     assert all(artist.get_zorder() > fig.axes[0].images[0].get_zorder()
