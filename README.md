@@ -54,6 +54,12 @@ Key design choice: **window + masking** keeps the action space finite. Compare t
   3. CSP/probabilistic solver (enumerate consistent mine configurations on each frontier component, guess lowest probability).
   4. Optional: imitation learning from the CSP solver, then RL fine-tuning.
 
+For the strongest current play, run the exact-constraint hybrid (DQN ranks equally best-risk choices; the solver selects the risk tier):
+`python -m experiments.play --agent dqn --model dqn_cnn_flags_15x15_context_200.npz`.
+It uses memoized dynamic programming over local clue constraints, flags certain mines, automatically chords matching clues, and picks a fresh unconstrained cell when it has lower risk than the frontier. It continues until a mine, an optional `--moves` limit, or user Pause. With `--safe-only`, it pauses at a nonzero-risk decision; clicking Continue explicitly opts into the solver's lowest-risk guess.
+
+For human play, left-click reveals, right-click flags, and holding both buttons on a numbered clue chords its hidden neighbors when the flag count matches.
+
 ## 6. Experiments
 
 | # | Experiment | Compares |
