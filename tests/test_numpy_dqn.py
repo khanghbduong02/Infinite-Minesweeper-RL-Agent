@@ -42,6 +42,19 @@ def test_backward_matches_finite_differences(net):
             assert abs((hi - lo) / (2 * eps) - g[idx]) < 1e-5
 
 
+def test_mine_penalty_parameter_changes_terminal_reward():
+    from env.gym_wrapper import MinesweeperWindowEnv
+
+    env = MinesweeperWindowEnv(window_size=5, p=1.0, seed=1,
+                               max_steps=None, max_revealed=None,
+                               mine_penalty=37.0)
+    obs, _ = env.reset(seed=1)
+    action = next(i for i, legal in enumerate(obs["action_mask"])
+                  if legal and env._coords(i) not in env.board.safe)
+    _, reward, terminated, _, _ = env.step(action)
+    assert terminated and reward == -37.0
+
+
 def test_flag_action_network_outputs_spatial_reveal_and_flag_heads():
     rng = np.random.default_rng(4)
     for net in ("cnn", "mlp"):

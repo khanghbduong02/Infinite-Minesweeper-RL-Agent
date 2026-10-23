@@ -171,14 +171,15 @@ def train(episodes=2000, window=9, density=0.10, seed=0, save="dqn_mines.npz",
           net="mlp", hid=None, gamma=0.99, lr=1e-3, buf_size=20_000, batch=64,
           eps0=1.0, eps1=0.05, target_sync=500, max_steps=300,
           update_every=4, log_every=25, ckpt_every=200, resume=False,
-          max_revealed=10000, flag_actions=False, init_from=None):
+          max_revealed=10000, flag_actions=False, init_from=None,
+          mine_penalty=10.0):
     if hid is None:
         hid = 32 if net == "cnn" else 256  # cnn: channels per conv layer
     t0 = time.time()
     rng = np.random.default_rng(seed)
     env = MinesweeperWindowEnv(window_size=window, p=density, seed=seed,
                                max_steps=max_steps, max_revealed=max_revealed,
-                               flag_actions=flag_actions)
+                               flag_actions=flag_actions, mine_penalty=mine_penalty)
     q = make_net(net, window, hid, rng, flag_actions)
     start_ep = 0
     source = init_from if init_from is not None else (save if resume else None)
@@ -288,6 +289,12 @@ def main():
     ap.add_argument("--update-every", type=int, default=4)
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument("--max-revealed", type=int, default=10000)
+    ap.add_argument("--mine-penalty", type=float, default=10.0,
+                    help="terminal reward magnitude for hitting a mine")
+    ap.add_argument("--eps0", type=float, default=1.0,
+                    help="initial epsilon (use a smaller value when fine-tuning)")
+    ap.add_argument("--eps1", type=float, default=0.05,
+                    help="final epsilon")
     ap.add_argument("--ckpt-every", type=int, default=200)
     ap.add_argument("--resume", action="store_true",
                     help="initialize from --save before training (then save back to it)")
@@ -301,7 +308,8 @@ def main():
           update_every=a.update_every, log_every=a.log_every,
           ckpt_every=a.ckpt_every, resume=a.resume,
           max_revealed=a.max_revealed, flag_actions=a.flag_actions,
-          init_from=a.init_from)
+          init_from=a.init_from, mine_penalty=a.mine_penalty,
+          eps0=a.eps0, eps1=a.eps1)
 
 
 if __name__ == "__main__":

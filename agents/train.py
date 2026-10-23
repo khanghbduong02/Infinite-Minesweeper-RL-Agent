@@ -18,7 +18,10 @@ def main():
     ap.add_argument("--reward", type=str, default="dense",
                     choices=["dense", "cascade", "sparse"])
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--mine-penalty", type=float, default=10.0)
     ap.add_argument("--save", type=str, default="ppo_mines.pt")
+    ap.add_argument("--extractor", choices=["mlp", "cnn"], default="mlp",
+                    help="feature extractor for board observations")
     args = ap.parse_args()
 
     try:
@@ -32,8 +35,15 @@ def main():
     from env.gym_wrapper import MinesweeperWindowEnv
 
     env = MinesweeperWindowEnv(window_size=args.window, p=args.density,
-                               seed=args.seed, reward_mode=args.reward)
-    model = MaskablePPO("MultiInputPolicy", env, verbose=1, seed=args.seed)
+                               seed=args.seed, reward_mode=args.reward,
+                               mine_penalty=args.mine_penalty)
+    policy_kwargs = {}
+    if args.extractor == "cnn":
+        from agents.ppo_cnn import MinesweeperCNNExtractor
+        policy_kwargs["features_extractor_class"] = MinesweeperCNNExtractor
+        policy_kwargs["net_arch"] = {"pi": [128], "vf": [128]}
+    model = MaskablePPO("MultiInputPolicy", env, verbose=1, seed=args.seed,
+                        policy_kwargs=policy_kwargs)
     model.learn(total_timesteps=args.timesteps)
     model.save(args.save)
     print(f"saved -> {args.save}")
