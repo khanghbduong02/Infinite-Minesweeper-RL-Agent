@@ -30,15 +30,15 @@ The question is where learning adds value over exact reasoning.
 - Actions: reveal a cell, flag a cell.
 - Episode ends on hitting a mine, or after a step/cell budget.
 
-> Pin down exactly how "infinite Minesweeper" is defined in your version (mine density, safe-start rule, whether flags are required) and keep it fixed. Write it in `docs/rules.md`.
+> Pin down exactly how "infinite Minesweeper" is defined in your version (mine density, safe-start rule, whether flags are required) and keep it fixed. Write it in `GUIDE.md`.
 
 ## 4. RL Formulation
 
 | Component | Design |
 |---|---|
 | Agent | CNN policy over a local window |
-| Observation | `(C, H, W)` window centered on the agent's focus point. Channels: hidden, revealed number (one-hot 0-8), flagged, out-of-window mask |
-| Actions | Choose a cell inside the window to reveal (`H*W` actions) with action masking for already-revealed cells. Optionally a "shift window" action |
+| Observation | `(11, H, W)` window centered on focus: one hidden channel, one flagged channel, and nine one-hot clue channels (0–8). No out-of-window channel is needed on the unbounded board. |
+| Actions | Reveal a cell in the window (`H*W` actions); NumPy DQN can optionally add `H*W` flag actions. The action mask is provided separately. The window follows focus automatically. |
 | Reward | +small for each newly revealed safe cell, +larger for cells opened via a zero cascade, large negative on mine hit, small step cost. Compare against sparse "survive N cells" reward |
 | Objective | Maximize safe cells revealed before hitting a mine (survival length) |
 
@@ -55,10 +55,12 @@ Key design choice: **window + masking** keeps the action space finite. Compare t
   4. Optional: imitation learning from the CSP solver, then RL fine-tuning.
 
 For the strongest current play, run the exact-constraint hybrid (DQN ranks equally best-risk choices; the solver selects the risk tier):
-`python -m experiments.play --agent dqn --model dqn_cnn_flags_15x15_context_200.npz`.
+`python -m experiments.play --agent dqn --model models/dqn_cnn_flags_15x15_context_200.npz`.
 It uses memoized dynamic programming over local clue constraints, flags certain mines, automatically chords matching clues, and picks a fresh unconstrained cell when it has lower risk than the frontier. It continues until a mine, an optional `--moves` limit, or user Pause. With `--safe-only`, it pauses at a nonzero-risk decision; clicking Continue explicitly opts into the solver's lowest-risk guess.
 
 For human play, left-click reveals, right-click flags, and holding both buttons on a numbered clue chords its hidden neighbors when the flag count matches.
+
+Everything about the project — rules, an RL primer, how the solver and hybrid actually work, every measured number with its caveats, and what to do next — is in **`GUIDE.md`**.
 
 ## 6. Experiments
 
@@ -109,8 +111,10 @@ infinite-minesweeper-rl/
   solvers/        # random, rules, csp
   agents/         # PPO configs, custom PPO
   experiments/    # one script/config per experiment
-  analysis/       # plots, notebooks
-  docs/rules.md
+  analysis/       # benchmark code, results, and logs
+  models/         # trained model checkpoints
+  runs/           # generated training logs, images, and notes
+  GUIDE.md        # the complete guide: rules, RL, solver, results, next steps
   README.md
 ```
 

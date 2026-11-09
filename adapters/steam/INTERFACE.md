@@ -14,4 +14,4 @@ Planned modules (implement when you own the game):
 - `actuate.py` (optional) — click-through reveal/flag at screen coords.
 
 Contract: `to_observation(board_view) -> (tensor, mask, focus)` identical in
-shape/semantics to `MinesweeperWindowEnv._obs()`. See `docs/rules.md` §3.
+shape/semantics to `MinesweeperWindowEnv._obs()`. See `GUIDE.md` §2.3.
